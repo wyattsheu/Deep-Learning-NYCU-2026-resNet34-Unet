@@ -1,4 +1,8 @@
 import os
+
+# 加入這行來減少 CUDA 記憶體破碎化
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 from contextlib import nullcontext
 import torch
 import torch.nn as nn
@@ -30,7 +34,7 @@ def dice_loss_from_logits(logits, targets, smooth=1.0):
 
 def train():
     Epochs = 50
-    Batch_size = 48  # 因為尺寸變 572，如果 VRAM 爆掉請降為 8
+    Batch_size = 32 if torch.cuda.device_count() > 1 else 16
     Learning_rate = 1e-4
     model_type = "UNet"  # 可選擇 "UNet" 或 "ResNet34_UNet"
 
@@ -93,17 +97,17 @@ def train():
     print(f"device: {device}")
     print(f"training by {model_type} model")
     ###########應註解掉
-    # if hasattr(torch, "compile"):
-    #     try:
-    #         model = torch.compile(model, mode="reduce-overhead")
-    #         print("torch.compile enabled")
-    #     except Exception as e:
-    #         print(f"torch.compile skipped: {e}")
+    if hasattr(torch, "compile"):
+        try:
+            model = torch.compile(model, mode="reduce-overhead")
+            print("torch.compile enabled")
+        except Exception as e:
+            print(f"torch.compile skipped: {e}")
 
     # # 如果有多個 GPU，使用 nn.DataParallel
-    # if torch.cuda.device_count() > 1:
-    #     print(f"Using {torch.cuda.device_count()} GPUs with nn.DataParallel")
-    #     model = nn.DataParallel(model)
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs with nn.DataParallel")
+        model = nn.DataParallel(model)
     ###########
 
     bce_loss_fn = nn.BCEWithLogitsLoss()
@@ -152,7 +156,12 @@ def train():
                 autocast_context = nullcontext()
 
             with autocast_context:
-                out = model(image)
+
+                # 如果模型有被包裝 (有 module 屬性)，就脫殼；如果沒有，就保持原樣
+                raw_model = model.module if hasattr(model, "module") else model
+                out = raw_model(image)
+                ###
+                # out = model(image)
                 bce_loss = bce_loss_fn(out, mask)
                 dice_loss = dice_loss_from_logits(out, mask)
                 loss = 0.2 * bce_loss + 0.8 * dice_loss
@@ -180,14 +189,10 @@ def train():
             best_dice = val_dice
 
             save_path = os.path.join(save_dir, f"best_{model_type}.pth")
-            torch.save(model.state_dict(), save_path)
-            # 🌟 判斷是否有被 DataParallel 包裝，有則脫殼儲存
-            # if isinstance(model, nn.DataParallel):
-            #     torch.save(model.module.state_dict(), save_path)
-            # else:
-            #     torch.save(model.state_dict(), save_path)
-            ##########!!!!Notion
-
+            # 🔥 神奇的一行：自動適應單卡/多卡環境
+            model_to_save = model.module if hasattr(model, "module") else model
+            # torch.save(model.state_dict(), save_path)
+            torch.save(model_to_save.state_dict(), save_path)
             print(f"new model saved at {save_path}\n")
 
 
