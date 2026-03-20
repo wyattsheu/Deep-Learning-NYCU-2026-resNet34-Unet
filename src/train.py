@@ -158,10 +158,10 @@ def train():
             with autocast_context:
 
                 # 如果模型有被包裝 (有 module 屬性)，就脫殼；如果沒有，就保持原樣
-                raw_model = model.module if hasattr(model, "module") else model
-                out = raw_model(image)
+                # raw_model = model.module if hasattr(model, "module") else model
+                # out = raw_model(image)
                 ###
-                # out = model(image)
+                out = model(image)
                 bce_loss = bce_loss_fn(out, mask)
                 dice_loss = dice_loss_from_logits(out, mask)
                 loss = 0.2 * bce_loss + 0.8 * dice_loss
