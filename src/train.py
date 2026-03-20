@@ -30,7 +30,7 @@ def dice_loss_from_logits(logits, targets, smooth=1.0):
 
 def train():
     Epochs = 50
-    Batch_size = 16  # 因為尺寸變 572，如果 VRAM 爆掉請降為 8
+    Batch_size = 32  # 因為尺寸變 572，如果 VRAM 爆掉請降為 8
     Learning_rate = 1e-4
     model_type = "UNet"  # 可選擇 "UNet" 或 "ResNet34_UNet"
 
