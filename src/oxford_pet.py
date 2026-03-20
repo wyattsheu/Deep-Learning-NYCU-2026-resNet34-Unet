@@ -1,5 +1,8 @@
 import os
 import random
+
+random.seed(42)
+
 import torch
 import numpy as np
 from PIL import Image
