@@ -101,16 +101,17 @@ def train():
     print("=" * 60 + "\n")
 
     bce_loss_fn = nn.BCEWithLogitsLoss()
-    optimizer = optim.Adam(model.parameters(), lr=Learning_rate)
-
-    try:
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="max", patience=3, factor=0.5, verbose=True
-        )
-    except TypeError:
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="max", patience=3, factor=0.5
-        )
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=Learning_rate,
+        weight_decay=1e-2,
+    )
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=Learning_rate * 10,
+        steps_per_epoch=len(train_loader),
+        epochs=Epochs,
+    )
 
     amp_enabled = use_cuda
     if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
@@ -151,8 +152,11 @@ def train():
                 loss = 0.2 * bce_loss + 0.8 * dice_loss
 
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
+            scheduler.step()
 
             loss_temp += loss.item()
             progress_bar.set_postfix({"Loss": f"{loss.item():.4f}"})
@@ -165,8 +169,6 @@ def train():
         print(
             f"Epoch [{epoch+1}/{Epochs}] - Train Loss: {avg_train_loss:.4f} | Val Dice Score: {val_dice:.4f}"
         )
-
-        scheduler.step(val_dice)
 
         if val_dice > best_dice:
             best_dice = val_dice

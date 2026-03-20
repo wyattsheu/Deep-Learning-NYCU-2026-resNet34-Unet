@@ -1,9 +1,12 @@
 import os
+import random
 import torch
 import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
+import torchvision.transforms.functional as TF
+from torchvision.transforms import InterpolationMode
 from datasets import load_dataset
 
 
@@ -107,10 +110,10 @@ class OxfordPetDataset(Dataset):
 
         # 處理圖片 (輸出為 image_size x image_size)
         orig_w, orig_h = image.size
-        image_tensor = self.image_transform(image)
-        image_unpadded_tensor = self.image_unpadded_transform(image)
 
         if self.split.startswith("test") and not self.return_mask_for_test:
+            image_tensor = self.image_transform(image)
+            image_unpadded_tensor = self.image_unpadded_transform(image)
             if self.return_unpadded_for_test:
                 return (
                     image_tensor,
@@ -130,6 +133,30 @@ class OxfordPetDataset(Dataset):
             mask = Image.open(mask_path).convert("L")
         else:
             mask = item["mask"].convert("L")
+
+        if self.split == "train":
+            if random.random() > 0.5:
+                image = TF.hflip(image)
+                mask = TF.hflip(mask)
+
+            if random.random() > 0.5:
+                angle = random.uniform(-15.0, 15.0)
+                image = TF.rotate(
+                    image,
+                    angle,
+                    interpolation=InterpolationMode.BILINEAR,
+                    fill=0,
+                )
+                mask = TF.rotate(
+                    mask,
+                    angle,
+                    interpolation=InterpolationMode.NEAREST,
+                    fill=0,
+                )
+
+        # augmentation 之後再做 resize/pad，確保 image/mask 幾何同步。
+        image_tensor = self.image_transform(image)
+        image_unpadded_tensor = self.image_unpadded_transform(image)
 
         mask = mask.resize((self.mask_size, self.mask_size), Image.NEAREST)
         mask_array = np.array(mask)

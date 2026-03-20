@@ -1,17 +1,122 @@
 import torch
 import torch.nn as nn
 
+
 class ResNet34_UNet(nn.Module):
     def __init__(self, in_channels=3, out_channels=1):
         super(ResNet34_UNet, self).__init__()
-        """
-        TODO: 
-        1. 從零開始實作 ResNet34 的架構作為 Encoder。
-        2. 結合 UNet 的 Decoder 架構。
-        不可呼叫 torchvision.models.resnet34，也不可載入預訓練權重。
-        """
-        pass
+
+        # --- Encoder: ResNet34 從零實作 ---
+        self.inplanes = 64
+        # 初始層 (Stem)
+        self.conv1 = nn.Conv2d(
+            in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False
+        )
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+
+        # ResNet Stages
+        self.layer1 = self._make_layer(BasicBlock, 64, 3)  # Stage 1
+        self.layer2 = self._make_layer(BasicBlock, 128, 4, stride=2)  # Stage 2
+        self.layer3 = self._make_layer(BasicBlock, 256, 6, stride=2)  # Stage 3
+        self.layer4 = self._make_layer(
+            BasicBlock, 512, 3, stride=2
+        )  # Stage 4 (Bottleneck)
+
+        # --- Decoder: UNet 結構 ---
+        # 注意：ResNet 的輸出通道分別是 64, 128, 256, 512
+        self.up4 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+        self.dec4 = DoubleConv(512, 256)  # 256 (up) + 256 (skip)
+
+        self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.dec3 = DoubleConv(256, 128)  # 128 (up) + 128 (skip)
+
+        self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.dec2 = DoubleConv(128, 64)  # 64 (up) + 64 (skip)
+
+        self.up1 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
+        self.dec1 = DoubleConv(128, 64)  # 64 (up) + 64 (skip)
+
+        # 補回最初的 7x7 conv 造成的解析度下降
+        self.final_up = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
+        self.final_conv = nn.Conv2d(32, out_channels, kernel_size=1)
+
+        self._initialize_weights()
+
+    def _make_layer(self, block, planes, blocks, stride=1):
+        downsample = None
+        if stride != 1 or self.inplanes != planes * block.expansion:
+            downsample = nn.Sequential(
+                nn.Conv2d(
+                    self.inplanes,
+                    planes * block.expansion,
+                    kernel_size=1,
+                    stride=stride,
+                    bias=False,
+                ),
+                nn.BatchNorm2d(planes * block.expansion),
+            )
+
+        layers = []
+        layers.append(block(self.inplanes, planes, stride, downsample))
+        self.inplanes = planes * block.expansion
+        for _ in range(1, blocks):
+            layers.append(block(self.inplanes, planes))
+
+        return nn.Sequential(*layers)
 
     def forward(self, x):
-        # TODO: 定義前向傳播邏輯
-        pass
+        # Encoder Path
+        x0 = self.relu(self.bn1(self.conv1(x)))  # 1/2 size (112x112)
+        s1 = self.layer1(self.maxpool(x0))  # 1/4 size (56x56)
+        s2 = self.layer2(s1)  # 1/8 size (28x28)
+        s3 = self.layer3(s2)  # 1/16 size (14x14)
+        s4 = self.layer4(s3)  # 1/32 size (7x7)
+
+        # Decoder Path
+        x = self.up4(s4)
+        x = torch.cat([x, s3], dim=1)
+        x = self.dec4(x)
+
+        x = self.up3(x)
+        x = torch.cat([x, s2], dim=1)
+        x = self.dec3(x)
+
+        x = self.up2(x)
+        x = torch.cat([x, s1], dim=1)
+        x = self.dec2(x)
+
+        x = self.up1(x)
+        x = torch.cat([x, x0], dim=1)  # 與初始層進行 Concat
+        x = self.dec1(x)
+
+        x = self.final_up(x)
+        return self.final_conv(x)
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+
+class DoubleConv(nn.Module):
+    """這裡使用 Padding=1 確保解析度不會像你原本的代碼那樣一直縮小，
+    這樣在結合 ResNet 時會比較好對齊。"""
+
+    def __init__(self, in_channels, out_channels):
+        super(DoubleConv, self).__init__()
+        self.double_conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.double_conv(x)
