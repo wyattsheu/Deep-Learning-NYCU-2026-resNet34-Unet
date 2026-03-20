@@ -1,1 +1,43 @@
+### Python 暫存與編譯檔案 ###
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+.pytest_cache/
 
+### 深度學習相關 (重要！) ###
+# 隱藏存放權重的資料夾或檔案
+*.pth
+*.pt
+*.h5
+*.ckpt
+# 如果你有建立一個專門放權重的目錄，例如 weights/，也建議加入
+# weights/
+
+### 資料集與輸出 ###
+# 雖然你的目錄有 dataset/，但裡面目前看起來只有 .txt 清單。
+# 如果未來你在這裡放入原始圖檔 (如 .jpg, .png)，建議過濾掉：
+# Lab2/dataset/*.jpg
+# Lab2/dataset/*.png
+
+# 預測結果輸出
+results/
+runs/
+logs/
+
+### 虛擬環境 ###
+venv/
+.venv/
+env/
+bin/
+lib/
+
+### 作業系統與 IDE ###
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+### 其他 ###
+# 如果有敏感資訊 (如你剛才提到的 HF_TOKEN) 放在 .env 檔中
+.env
