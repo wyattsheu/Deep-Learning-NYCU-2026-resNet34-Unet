@@ -93,17 +93,17 @@ def train():
     print(f"device: {device}")
     print(f"training by {model_type} model")
     ###########應註解掉
-    if hasattr(torch, "compile"):
-        try:
-            model = torch.compile(model, mode="reduce-overhead")
-            print("torch.compile enabled")
-        except Exception as e:
-            print(f"torch.compile skipped: {e}")
+    # if hasattr(torch, "compile"):
+    #     try:
+    #         model = torch.compile(model, mode="reduce-overhead")
+    #         print("torch.compile enabled")
+    #     except Exception as e:
+    #         print(f"torch.compile skipped: {e}")
 
-    # 如果有多個 GPU，使用 nn.DataParallel
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs with nn.DataParallel")
-        model = nn.DataParallel(model)
+    # # 如果有多個 GPU，使用 nn.DataParallel
+    # if torch.cuda.device_count() > 1:
+    #     print(f"Using {torch.cuda.device_count()} GPUs with nn.DataParallel")
+    #     model = nn.DataParallel(model)
     ###########
 
     bce_loss_fn = nn.BCEWithLogitsLoss()
@@ -180,12 +180,12 @@ def train():
             best_dice = val_dice
 
             save_path = os.path.join(save_dir, f"best_{model_type}.pth")
-            # torch.save(model.state_dict(), save_path)
+            torch.save(model.state_dict(), save_path)
             # 🌟 判斷是否有被 DataParallel 包裝，有則脫殼儲存
-            if isinstance(model, nn.DataParallel):
-                torch.save(model.module.state_dict(), save_path)
-            else:
-                torch.save(model.state_dict(), save_path)
+            # if isinstance(model, nn.DataParallel):
+            #     torch.save(model.module.state_dict(), save_path)
+            # else:
+            #     torch.save(model.state_dict(), save_path)
             ##########!!!!Notion
 
             print(f"new model saved at {save_path}\n")
