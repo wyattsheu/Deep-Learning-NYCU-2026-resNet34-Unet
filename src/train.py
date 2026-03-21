@@ -75,7 +75,7 @@ def train(Epochs=60, Batch_size=24, Learning_rate=1e-4, model_type="ResNet34_UNe
         train_dataset,
         batch_size=Batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=2,
         pin_memory=use_cuda,
     )
     val_loader = DataLoader(val_dataset, batch_size=Batch_size, shuffle=False)
