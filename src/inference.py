@@ -27,7 +27,7 @@ def get_model_io_size(model_type: str):
     if model_type == "UNet":
         return (572, 572), (388, 388)
     # ResNet34_UNet is trained with same-size input/output in this project.
-    return (512, 512), (512, 512)
+    return (256, 256), (256, 256)
 
 
 def infer_model_type_from_checkpoint(model_path: str):
@@ -288,7 +288,21 @@ def run_inference(args):
                 # Kaggle evaluates masks in each test image's original resolution.
                 orig_h = int(orig_sizes[idx, 0].item())
                 orig_w = int(orig_sizes[idx, 1].item())
-                mask_img = Image.fromarray((binary_mask * 255).astype(np.uint8))
+                target_side = target_size[0]
+
+                scale = target_side / max(orig_h, orig_w)
+                new_w = max(1, int(round(orig_w * scale)))
+                new_h = max(1, int(round(orig_h * scale)))
+
+                pad_left = (target_side - new_w) // 2
+                pad_top = (target_side - new_h) // 2
+
+                cropped_mask = binary_mask[
+                    pad_top : pad_top + new_h,
+                    pad_left : pad_left + new_w,
+                ]
+
+                mask_img = Image.fromarray((cropped_mask * 255).astype(np.uint8))
                 mask_img = mask_img.resize((orig_w, orig_h), resample=NEAREST_RESAMPLE)
                 binary_mask_for_submit = (np.array(mask_img) > 127).astype(np.uint8)
 

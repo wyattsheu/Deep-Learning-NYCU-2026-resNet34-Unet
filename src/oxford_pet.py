@@ -12,6 +12,37 @@ from torchvision.transforms import InterpolationMode
 from datasets import load_dataset
 
 
+class LetterBoxResize:
+    def __init__(self, target_size, interpolation=InterpolationMode.BILINEAR, fill=0):
+        self.target_size = target_size
+        self.interpolation = interpolation
+        self.fill = fill
+
+    def __call__(self, img):
+        w, h = img.size
+        scale = self.target_size / max(h, w)
+
+        new_w = max(1, int(round(w * scale)))
+        new_h = max(1, int(round(h * scale)))
+
+        resized = TF.resize(
+            img,
+            (new_h, new_w),
+            interpolation=self.interpolation,
+        )
+
+        pad_left = (self.target_size - new_w) // 2
+        pad_top = (self.target_size - new_h) // 2
+        pad_right = self.target_size - new_w - pad_left
+        pad_bottom = self.target_size - new_h - pad_top
+
+        return TF.pad(
+            resized,
+            (pad_left, pad_top, pad_right, pad_bottom),
+            fill=self.fill,
+        )
+
+
 class OxfordPetDataset(Dataset):
     HF_DATASET_NAME = "wyattsheu/oxford-pet-full-raw"
 
@@ -36,7 +67,7 @@ class OxfordPetDataset(Dataset):
         if not os.path.exists(txt_path):
             raise FileNotFoundError(f"Split file not found: {txt_path}")
 
-        with open(txt_path, "r") as f:
+        with open(txt_path, "r", encoding="utf-8") as f:
             self.target_names = []
             for line in f:
                 line = line.strip()
@@ -79,19 +110,31 @@ class OxfordPetDataset(Dataset):
         # 🌟 計算需要鏡像填充的像素大小 (例如 572 - 388 = 184，除以2 = 92)
         pad_size = (self.image_size - self.mask_size) // 2
 
+        # 先做等比例縮放 + 黑邊補齊，避免拉伸變形。
+        letterbox_image = LetterBoxResize(
+            self.mask_size,
+            interpolation=InterpolationMode.BILINEAR,
+            fill=0,
+        )
+
         # 🌟 圖片轉換：先縮放到預測區塊大小，再用鏡像 (reflect) 補齊外圍犧牲區
         self.image_transform = transforms.Compose(
             [
-                transforms.Resize((self.mask_size, self.mask_size)),
+                letterbox_image,
                 transforms.Pad(pad_size, padding_mode="reflect"),
                 transforms.ToTensor(),
             ]
         )
         self.image_unpadded_transform = transforms.Compose(
             [
-                transforms.Resize((self.mask_size, self.mask_size)),
+                letterbox_image,
                 transforms.ToTensor(),
             ]
+        )
+        self.mask_transform = LetterBoxResize(
+            self.mask_size,
+            interpolation=InterpolationMode.NEAREST,
+            fill=0,
         )
 
     def __len__(self):
@@ -168,7 +211,7 @@ class OxfordPetDataset(Dataset):
         image_tensor = self.image_transform(image)
         image_unpadded_tensor = self.image_unpadded_transform(image)
 
-        mask = mask.resize((self.mask_size, self.mask_size), Image.NEAREST)
+        mask = self.mask_transform(mask)
         mask_array = np.array(mask)
         binary_mask = np.zeros_like(mask_array, dtype=np.float32)
         binary_mask[mask_array == 1] = 1.0
