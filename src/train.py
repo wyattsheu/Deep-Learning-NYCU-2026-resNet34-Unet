@@ -13,6 +13,7 @@ os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "0")
 from contextlib import nullcontext
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -196,9 +197,14 @@ def train(
                 ###
                 out = model(image)
 
-                focal_loss = focal_loss_from_logits(out, mask)
-                dice_loss = dice_loss_from_logits(out, mask)
-                loss = 0.5 * focal_loss + 0.5 * dice_loss
+                if model_type == "UNet":
+                    focal_loss = focal_loss_from_logits(out, mask)
+                    dice_loss = dice_loss_from_logits(out, mask)
+                    loss = 0.5 * focal_loss + 0.5 * dice_loss
+                else:
+                    bce_loss = nn.BCEWithLogitsLoss()(out, mask)
+                    dice_loss = dice_loss_from_logits(out, mask)
+                    loss = 0.4 * bce_loss + 0.6 * dice_loss
 
             # Check for non-finite loss BEFORE backward to avoid corrupting GradScaler state
             if not torch.isfinite(loss):
