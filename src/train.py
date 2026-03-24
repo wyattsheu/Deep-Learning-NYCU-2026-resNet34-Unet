@@ -97,7 +97,7 @@ def train(
         train_dataset,
         batch_size=Batch_size,
         shuffle=True,
-        num_workers=2,
+        num_workers=4,
         pin_memory=use_cuda,
     )
     val_loader = DataLoader(val_dataset, batch_size=Batch_size, shuffle=False)

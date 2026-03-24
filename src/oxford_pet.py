@@ -4,12 +4,40 @@ import random
 
 import torch
 import numpy as np
+import cv2
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 import torchvision.transforms.functional as TF
 from torchvision.transforms import InterpolationMode
+from torchvision.transforms import v2
 from datasets import load_dataset
+
+
+def apply_clahe(pil_img):
+    """
+    對 PIL 影像應用 CLAHE (限制對比度自適應直方圖均衡化)。
+    只強化亮度 (L) 通道，凸顯陰影或模糊邊界，且不會讓毛色失真。
+    """
+    img_np = np.array(pil_img)
+    lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
+    l, a, b = cv2.split(lab)
+
+    # 建立 CLAHE 物件 (clipLimit=2.0 是溫和且有效的經驗值)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    cl = clahe.apply(l)
+
+    limg = cv2.merge((cl, a, b))
+    img_clahe = cv2.cvtColor(limg, cv2.COLOR_LAB2RGB)
+    return Image.fromarray(img_clahe)
+
+
+def add_gaussian_noise(pil_img, sigma=0.05):
+    """只對影像加入輕微高斯雜訊，避免破壞 segmentation mask 標籤。"""
+    img_tensor = TF.to_tensor(pil_img)
+    noise = torch.randn_like(img_tensor) * sigma
+    img_tensor = torch.clamp(img_tensor + noise, 0.0, 1.0)
+    return TF.to_pil_image(img_tensor)
 
 
 class LetterBoxResize:
@@ -110,32 +138,26 @@ class OxfordPetDataset(Dataset):
         # 🌟 計算需要鏡像填充的像素大小 (例如 572 - 388 = 184，除以2 = 92)
         pad_size = (self.image_size - self.mask_size) // 2
 
-        # 先做等比例縮放 + 黑邊補齊，避免拉伸變形。
-        letterbox_image = LetterBoxResize(
+        # 先做等比例縮放 + 黑邊補齊
+        self.letterbox_image = LetterBoxResize(
             self.mask_size,
             interpolation=InterpolationMode.BILINEAR,
             fill=0,
         )
-
-        # 🌟 圖片轉換：先縮放到預測區塊大小，再用鏡像 (reflect) 補齊外圍犧牲區
-        self.image_transform = transforms.Compose(
-            [
-                letterbox_image,
-                transforms.Pad(pad_size, padding_mode="reflect"),
-                transforms.ToTensor(),
-            ]
-        )
-        self.image_unpadded_transform = transforms.Compose(
-            [
-                letterbox_image,
-                transforms.ToTensor(),
-            ]
-        )
-        self.mask_transform = LetterBoxResize(
+        self.letterbox_mask = LetterBoxResize(
             self.mask_size,
             interpolation=InterpolationMode.NEAREST,
             fill=0,
         )
+
+        # 圖片後處理：補齊外圍犧牲區 (UNet 需要) 並轉 Tensor
+        self.pad_and_tensor = transforms.Compose(
+            [
+                transforms.Pad(pad_size, padding_mode="reflect"),
+                transforms.ToTensor(),
+            ]
+        )
+        self.just_tensor = transforms.ToTensor()
 
     def __len__(self):
         return len(self.target_names)
@@ -153,12 +175,15 @@ class OxfordPetDataset(Dataset):
             item = self.ds[hf_idx]
             image = item["image"].convert("RGB")
 
-        # 處理圖片 (輸出為 image_size x image_size)
+        # 記錄原始尺寸，供 test/inference 還原使用
         orig_w, orig_h = image.size
 
+        # 效能關鍵：先降解析度，再做後續 augmentation
+        image = self.letterbox_image(image)
+
         if self.split.startswith("test") and not self.return_mask_for_test:
-            image_tensor = self.image_transform(image)
-            image_unpadded_tensor = self.image_unpadded_transform(image)
+            image_tensor = self.pad_and_tensor(image)
+            image_unpadded_tensor = self.just_tensor(image)
             if self.return_unpadded_for_test:
                 return (
                     image_tensor,
@@ -179,39 +204,63 @@ class OxfordPetDataset(Dataset):
         else:
             mask = item["mask"].convert("L")
 
+        mask = self.letterbox_mask(mask)
+
         if self.split == "train":
+            # 1. 零成本變換
             if random.random() > 0.5:
                 image = TF.hflip(image)
                 mask = TF.hflip(mask)
 
-            if random.random() > 0.5:
+            # 2. 幾何變形 (三選一，或者都不做)
+            geom_choice = random.random()
+
+            if geom_choice < 0.2:
+                # 20% 機率執行：旋轉
                 angle = random.uniform(-15.0, 15.0)
                 image = TF.rotate(
-                    image,
-                    angle,
-                    interpolation=InterpolationMode.BILINEAR,
-                    fill=0,
+                    image, angle, interpolation=InterpolationMode.BILINEAR, fill=0
                 )
                 mask = TF.rotate(
-                    mask,
-                    angle,
-                    interpolation=InterpolationMode.NEAREST,
-                    fill=0,
+                    mask, angle, interpolation=InterpolationMode.NEAREST, fill=0
                 )
-            if random.random() > 0.5:
-                # 隨機調整亮度 (0.8~1.2)
+
+            elif geom_choice < 0.5:
+                # 20% 機率執行：平移縮放
+                affine = v2.RandomAffine(
+                    degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)
+                )
+                image, mask = affine(image, mask)
+
+            elif geom_choice < 0.6:
+                w, h = image.size
+                base_size = max(w, h)
+                elastic_alpha = base_size * 1.5
+                elastic_sigma = base_size * 0.025
+                elastic = v2.ElasticTransform(alpha=elastic_alpha, sigma=elastic_sigma)
+                image, mask = elastic(image, mask)
+
+            # 3. 色彩與光學 (三選一，或者都不做)
+            color_choice = random.random()
+
+            if color_choice < 0.2:
+                # 20% 機率執行：CLAHE 局部對比
+                image = apply_clahe(image)
+
+            elif color_choice < 0.4:
+                # 20% 機率執行：亮度對比微調
                 brightness_factor = random.uniform(0.8, 1.2)
                 image = TF.adjust_brightness(image, brightness_factor)
-
-                # 隨機調整對比度 (0.8~1.2)
                 contrast_factor = random.uniform(0.8, 1.2)
                 image = TF.adjust_contrast(image, contrast_factor)
 
-        # augmentation 之後再做 resize/pad，確保 image/mask 幾何同步。
-        image_tensor = self.image_transform(image)
-        image_unpadded_tensor = self.image_unpadded_transform(image)
+            elif color_choice < 0.6:
+                image = add_gaussian_noise(image, sigma=0.05)
 
-        mask = self.mask_transform(mask)
+        # 最後補邊與轉 tensor
+        image_tensor = self.pad_and_tensor(image)
+        image_unpadded_tensor = self.just_tensor(image)
+
         mask_array = np.array(mask)
         binary_mask = np.zeros_like(mask_array, dtype=np.float32)
         binary_mask[mask_array == 1] = 1.0
@@ -231,3 +280,172 @@ class OxfordPetDataset(Dataset):
 
         # 最終回傳：image_tensor(572x572), mask_tensor(388x388)
         return image_tensor, mask_tensor
+
+
+def _find_local_oxford_root(data_dir):
+    candidate_roots = [
+        os.path.join(data_dir, "oxford-iiit-pet"),
+        data_dir,
+    ]
+    for root in candidate_roots:
+        images_dir = os.path.join(root, "images")
+        trimaps_dir = os.path.join(root, "annotations", "trimaps")
+        if os.path.isdir(images_dir) and os.path.isdir(trimaps_dir):
+            return root
+    return None
+
+
+def _load_one_sample_for_visualization(data_dir, split="train"):
+    txt_path = os.path.join(data_dir, f"{split}.txt")
+    if not os.path.exists(txt_path):
+        raise FileNotFoundError(f"Split file not found: {txt_path}")
+
+    file_name = None
+    with open(txt_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            file_name = line.split()[0]
+            break
+
+    if file_name is None:
+        raise RuntimeError(f"No valid sample found in split file: {txt_path}")
+
+    local_root = _find_local_oxford_root(data_dir)
+    if local_root is None:
+        raise FileNotFoundError(
+            "找不到本地 Oxford Pet 資料夾，請確認 dataset/oxford-iiit-pet 存在。"
+        )
+
+    image_path = os.path.join(local_root, "images", file_name + ".jpg")
+    mask_path = os.path.join(local_root, "annotations", "trimaps", file_name + ".png")
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Local image not found: {image_path}")
+    if not os.path.exists(mask_path):
+        raise FileNotFoundError(f"Local mask not found: {mask_path}")
+
+    image = Image.open(image_path).convert("RGB")
+    mask = Image.open(mask_path).convert("L")
+    return file_name, image, mask
+
+
+def _tensor_to_hwc_uint8(tensor):
+    tensor_arr = tensor.detach().cpu().numpy().transpose(1, 2, 0)
+    tensor_arr = np.clip(tensor_arr, 0.0, 1.0)
+    return (tensor_arr * 255).astype(np.uint8)
+
+
+def _visualize_all_augmentations():
+    import matplotlib.pyplot as plt
+
+    plt.rcParams["font.sans-serif"] = [
+        "Microsoft JhengHei",
+        "PingFang TC",
+        "SimHei",
+        "Arial Unicode MS",
+    ]
+    plt.rcParams["axes.unicode_minus"] = False  # 避免設定字體後，負號變成方框的問題
+
+    random.seed(42)
+    torch.manual_seed(42)
+
+    vis_data_dir = os.path.abspath("dataset")
+    vis_file_name, vis_image, _ = _load_one_sample_for_visualization(
+        vis_data_dir, split="train"
+    )
+
+    vis_angle = 12.0
+    vis_brightness_factor = 1.15
+    vis_contrast_factor = 1.15
+    vis_noise_sigma = 0.05
+
+    image_hflip = TF.hflip(vis_image)
+
+    image_rotate = TF.rotate(
+        vis_image,
+        vis_angle,
+        interpolation=InterpolationMode.BILINEAR,
+        fill=0,
+    )
+
+    image_clahe = apply_clahe(vis_image)
+
+    w, h = vis_image.size
+    print(f"Original Image Size: {w}x{h}")
+
+    base_size = max(w, h)
+
+    # 業界黃金比例：alpha 為 0.45 倍，sigma 為 0.035 倍
+    elastic_alpha = base_size * 1.5
+    elastic_sigma = base_size * 0.025
+    print(
+        f"Elastic Transform Parameters: alpha={elastic_alpha:.1f}, sigma={elastic_sigma:.1f}"
+    )
+
+    elastic = v2.ElasticTransform(alpha=elastic_alpha, sigma=elastic_sigma)
+    image_elastic, _ = elastic(vis_image, vis_image)
+
+    affine = v2.RandomAffine(
+        degrees=0,
+        translate=(0.1, 0.1),
+        scale=(0.9, 1.1),
+    )
+    image_affine = affine(vis_image)
+
+    image_bc = TF.adjust_brightness(vis_image, vis_brightness_factor)
+    image_bc = TF.adjust_contrast(image_bc, vis_contrast_factor)
+
+    image_noise = add_gaussian_noise(vis_image, sigma=vis_noise_sigma)
+
+    vis_ds = OxfordPetDataset(
+        data_dir=vis_data_dir,
+        split="train",
+        image_size=572,
+        mask_size=388,
+    )
+    vis_image_small = vis_ds.letterbox_image(vis_image)
+    image_final = _tensor_to_hwc_uint8(vis_ds.pad_and_tensor(vis_image_small))
+    image_unpadded = _tensor_to_hwc_uint8(vis_ds.just_tensor(vis_image_small))
+
+    fig, axes = plt.subplots(2, 5, figsize=(24, 10))
+    axes = axes.ravel()
+
+    items = [
+        (np.array(vis_image), "Original Image 原始影像"),
+        (np.array(image_hflip), "HFlip Image 水平翻轉"),
+        (np.array(image_rotate), f"Rotate {vis_angle:.1f}° 旋轉"),
+        (np.array(image_clahe), "CLAHE 增強對比"),
+        (np.array(image_elastic), "Elastic Image 彈性變形"),
+        (np.array(image_affine), "Translation + Zoom 平移+縮放"),
+        (
+            np.array(image_bc),
+            f"Brightness {vis_brightness_factor:.2f} + Contrast {vis_contrast_factor:.2f} 亮度+對比",
+        ),
+        (
+            np.array(image_noise),
+            f"Gaussian Noise 高斯雜訊 (sigma={vis_noise_sigma:.2f})",
+        ),
+        (image_unpadded, "LetterBox Resize (mask_size) 等比例縮放"),
+        (image_final, "LetterBox + Reflect Pad (image_size) 填充"),
+    ]
+
+    for ax, (arr, title) in zip(axes, items):
+        ax.imshow(arr)
+        ax.set_title(title, fontsize=10)
+        ax.axis("off")
+
+    for ax in axes[len(items) :]:
+        ax.axis("off")
+
+    fig.suptitle(
+        f"Oxford Pet Augmentation Visualization: {vis_file_name} 增強視覺化",
+        fontsize=16,
+    )
+    plt.tight_layout(rect=[0, 0.02, 1, 0.96])
+    plt.show()
+
+
+if __name__ == "__main__":
+
+    _visualize_all_augmentations()
