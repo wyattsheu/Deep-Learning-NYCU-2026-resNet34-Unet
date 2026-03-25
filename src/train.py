@@ -25,30 +25,32 @@ from models.resnet34_unet import ResNet34_UNet
 from evaluate import evaluate
 
 
-def dice_loss_from_logits(logits, targets, smooth=1.0):
-    probs = torch.sigmoid(logits).float()
-    targets = targets.float()
+# def dice_loss_from_logits(logits, targets, smooth=1.0):
+#     probs = torch.sigmoid(logits).float()
+#     targets = targets.float()
 
-    probs = probs.view(probs.size(0), -1)
-    targets = targets.view(targets.size(0), -1)
+#     probs = probs.view(probs.size(0), -1)
+#     targets = targets.view(targets.size(0), -1)
 
-    intersection = (probs * targets).sum(dim=1)
-    dice = (2.0 * intersection + smooth) / (
-        probs.sum(dim=1) + targets.sum(dim=1) + smooth
-    )
-    return 1.0 - dice.mean()
+#     intersection = (probs * targets).sum(dim=1)
+#     dice = (2.0 * intersection + smooth) / (
+#         probs.sum(dim=1) + targets.sum(dim=1) + smooth
+#     )
+#     return 1.0 - dice.mean()
 
 
-def focal_loss_from_logits(logits, targets, alpha=0.25, gamma=2.0):
-    bce_loss = F.binary_cross_entropy_with_logits(
-        logits,
-        targets.float(),
-        reduction="none",
-    )
-    # Clamp prevents extreme values from destabilizing exp in mixed precision.
-    pt = torch.exp(-torch.clamp(bce_loss, max=100.0))
-    focal_loss = alpha * (1 - pt) ** gamma * bce_loss
-    return focal_loss.mean()
+# def focal_loss_from_logits(logits, targets, alpha=0.25, gamma=2.0):
+#     bce_loss = F.binary_cross_entropy_with_logits(
+#         logits,
+#         targets.float(),
+#         reduction="none",
+#     )
+#     # Clamp prevents extreme values from destabilizing exp in mixed precision.
+#     pt = torch.exp(-torch.clamp(bce_loss, max=100.0))
+#     focal_loss = alpha * (1 - pt) ** gamma * bce_loss
+#     return focal_loss.mean()
+
+from utils import dice_loss_from_logits, focal_loss_from_logits
 
 
 def train(
@@ -217,10 +219,20 @@ def train(
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-            scaler.step(optimizer)
-            scaler.update()
+            if amp_enabled:
+                # When overflow happens, GradScaler can skip optimizer.step().
+                # In that case we should also skip scheduler.step() to keep step order valid.
+                prev_scale = scaler.get_scale()
+                scaler.step(optimizer)
+                scaler.update()
+                if scaler.get_scale() >= prev_scale:
+                    scheduler.step()
+            else:
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+
             optimizer.zero_grad()
-            scheduler.step()
 
             current_loss = loss.item()
             train_loss += current_loss

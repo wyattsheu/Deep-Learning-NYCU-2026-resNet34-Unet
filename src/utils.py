@@ -1,12 +1,12 @@
 import torch
+import torch.nn.functional as F
 import numpy as np
 
 
-def calculate_dice_score(pred, target):
+def calculate_dice_score(pred, target, smooth=1e-5):
     """
-    TODO: 實作 Dice Score 邏輯
-    公式: 2 * (number of common pixels) / (predicted img size + ground truth img size)
-    注意: pred 與 target 應該要是 binary masks (0 與 1)
+    計算 Dice Score 供評估使用 (Val/Test)
+    🌟 smooth 改為安全的 1e-5
     """
     pred = pred.float()
     target = target.float()
@@ -21,11 +21,41 @@ def calculate_dice_score(pred, target):
 
     intersection = (pred * target).sum(dim=1)
     denominator = pred.sum(dim=1) + target.sum(dim=1)
-    dice = (2.0 * intersection + 1e-8) / (denominator + 1e-8)
+    # 🌟 替換成 1e-5，防止 FP16 除以零
+    dice = (2.0 * intersection + smooth) / (denominator + smooth)
     return dice.mean().item()
 
 
-# 你可以在這裡加入其他的輔助函式，例如視覺化預測結果的 function
+# ==========================================
+# 🌟 新增：數值穩定的防爆 Loss 函式
+# ==========================================
+def dice_loss_from_logits(pred, target, smooth=1e-5):
+    """防爆版 Dice Loss (供訓練時反向傳播使用)"""
+    pred = torch.sigmoid(pred)
+    pred = pred.view(-1)
+    target = target.view(-1)
+
+    intersection = (pred * target).sum()
+    # 🌟 同樣使用安全的 1e-5
+    dice = (2.0 * intersection + smooth) / (pred.sum() + target.sum() + smooth)
+    return 1.0 - dice
+
+
+def focal_loss_from_logits(pred, target, alpha=0.25, gamma=2.0):
+    """
+    防爆版 Focal Loss
+    🌟 核心：使用 PyTorch 底層 C++ 寫好的 binary_cross_entropy_with_logits
+    它自帶 Log-Sum-Exp 技巧，能完美防止 Log(0) 造成的 NaN 爆炸！
+    """
+    bce_loss = F.binary_cross_entropy_with_logits(pred, target, reduction="none")
+    pt = torch.exp(-bce_loss)  # pt 是模型預測正確的機率
+    focal_loss = alpha * (1 - pt) ** gamma * bce_loss
+    return focal_loss.mean()
+
+
+# ==========================================
+# 以下為原本的視覺化函式 (無修改，保留原樣)
+# ==========================================
 
 
 def visualize_predictions(image, pred_mask, target_mask=None, save_path=None):

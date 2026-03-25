@@ -235,39 +235,29 @@ class OxfordPetDataset(Dataset):
             elif geom_choice < 0.6:
                 w, h = image.size
                 base_size = max(w, h)
-                elastic_alpha = base_size * 1.4
-                elastic_sigma = base_size * 0.027
-
-                # elastic_alpha = base_size * 1.5
-                # elastic_sigma = base_size * 0.025
-
+                elastic_alpha = base_size * 1.5
+                elastic_sigma = base_size * 0.025
                 # elastic_alpha = base_size * 1.25
                 # elastic_sigma = base_size * 0.03
                 elastic = v2.ElasticTransform(alpha=elastic_alpha, sigma=elastic_sigma)
                 image, mask = elastic(image, mask)
 
-            # 3. 色彩與光學 (四選一，或者都不做)
+            # 3. 色彩與光學 (三選一，或者都不做)
             color_choice = random.random()
 
             if color_choice < 0.2:
-                # 20% 機率：CLAHE 局部對比
+                # 20% 機率執行：CLAHE 局部對比
                 image = apply_clahe(image)
 
             elif color_choice < 0.4:
-                # 20% 機率：亮度對比微調
+                # 20% 機率執行：亮度對比微調
                 brightness_factor = random.uniform(0.8, 1.2)
                 image = TF.adjust_brightness(image, brightness_factor)
                 contrast_factor = random.uniform(0.8, 1.2)
                 image = TF.adjust_contrast(image, contrast_factor)
 
             elif color_choice < 0.6:
-                # 20% 機率：微小高斯雜訊 (抗顆粒)
                 image = add_gaussian_noise(image, sigma=0.05)
-
-            elif color_choice < 0.8:
-                # 🌟 新增！20% 機率：高斯模糊 (抗失焦)
-                blur = v2.GaussianBlur(kernel_size=5, sigma=(0.1, 0.2))
-                image = blur(image)
 
         # 最後補邊與轉 tensor
         image_tensor = self.pad_and_tensor(image)
@@ -401,8 +391,8 @@ def _visualize_all_augmentations():
 
     base_size = max(w, h)
     # 這裡的 alpha/sigma 會自動配合 388 (或 256) 的尺寸算出剛好的力道
-    elastic_alpha = base_size * 1.4
-    elastic_sigma = base_size * 0.027
+    elastic_alpha = base_size * 1.25
+    elastic_sigma = base_size * 0.03
     print(
         f"Elastic Transform Parameters (Scaled): alpha={elastic_alpha:.1f}, sigma={elastic_sigma:.1f}"
     )
@@ -422,15 +412,11 @@ def _visualize_all_augmentations():
 
     image_noise = add_gaussian_noise(vis_image_small, sigma=vis_noise_sigma)
 
-    # 🌟 新增！高斯模糊
-    blur_transform = v2.GaussianBlur(kernel_size=5, sigma=(1, 2))
-    image_blur = blur_transform(vis_image_small)
-
     # 最終轉 Tensor 並加上鏡像外圍
     image_final = _tensor_to_hwc_uint8(vis_ds.pad_and_tensor(vis_image_small))
     image_unpadded = _tensor_to_hwc_uint8(vis_ds.just_tensor(vis_image_small))
 
-    fig, axes = plt.subplots(2, 6, figsize=(28, 10))
+    fig, axes = plt.subplots(2, 5, figsize=(24, 10))
     axes = axes.ravel()
 
     # 🌟 4. 調整顯示順序，讓你在第 2 格就能看到縮放後的基準圖
@@ -449,10 +435,6 @@ def _visualize_all_augmentations():
         (
             np.array(image_noise),
             f"Gaussian Noise 高斯雜訊 (sigma={vis_noise_sigma:.2f})",
-        ),
-        (
-            np.array(image_blur),
-            "Gaussian Blur 高斯模糊",
         ),
         (image_final, "LetterBox + Reflect Pad (image_size) 最終填充"),
     ]
