@@ -93,11 +93,14 @@ def train(
     if use_cuda:
         torch.backends.cudnn.benchmark = True
 
+    # Avoid excessive worker processes on limited CPU environments (e.g., Colab).
+    dataloader_workers = min(2, os.cpu_count() or 1)
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=Batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=dataloader_workers,
         pin_memory=use_cuda,
     )
     val_loader = DataLoader(val_dataset, batch_size=Batch_size, shuffle=False)

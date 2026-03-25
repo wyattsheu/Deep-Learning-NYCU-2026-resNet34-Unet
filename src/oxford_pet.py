@@ -235,14 +235,8 @@ class OxfordPetDataset(Dataset):
             elif geom_choice < 0.6:
                 w, h = image.size
                 base_size = max(w, h)
-                elastic_sigma = base_size * 1.4
+                elastic_alpha = base_size * 1.4
                 elastic_sigma = base_size * 0.027
-                
-                # elastic_alpha = base_size * 1.5
-                # elastic_sigma = base_size * 0.025
-                
-                # elastic_alpha = base_size * 1.25
-                # elastic_sigma = base_size * 0.03
                 elastic = v2.ElasticTransform(alpha=elastic_alpha, sigma=elastic_sigma)
                 image, mask = elastic(image, mask)
 
