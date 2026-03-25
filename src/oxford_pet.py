@@ -237,6 +237,12 @@ class OxfordPetDataset(Dataset):
                 base_size = max(w, h)
                 elastic_alpha = base_size * 1.4
                 elastic_sigma = base_size * 0.027
+
+                # elastic_alpha = base_size * 1.5
+                # elastic_sigma = base_size * 0.025
+
+                # elastic_alpha = base_size * 1.25
+                # elastic_sigma = base_size * 0.03
                 elastic = v2.ElasticTransform(alpha=elastic_alpha, sigma=elastic_sigma)
                 image, mask = elastic(image, mask)
 
@@ -257,7 +263,7 @@ class OxfordPetDataset(Dataset):
             elif color_choice < 0.6:
                 # 20% 機率：微小高斯雜訊 (抗顆粒)
                 image = add_gaussian_noise(image, sigma=0.05)
-                
+
             elif color_choice < 0.8:
                 # 🌟 新增！20% 機率：高斯模糊 (抗失焦)
                 blur = v2.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))

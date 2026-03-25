@@ -14,7 +14,6 @@ from contextlib import nullcontext
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
-import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from torchinfo import summary
@@ -143,31 +142,27 @@ def train(
     ###########
 
     # ==========================================
-    # 🌟 1. Optimizer 與 梯度累積步數設定
+    # 🌟 1. Optimizer 設定
     # ==========================================
     if model_type == "UNet":
         # [UNet 專屬] 改用 AdamW 加 Weight Decay 防過擬合
-        optimizer = torch.optim.AdamW(model.parameters(), lr=Learning_rate, weight_decay=1e-2)
-        # [UNet 專屬] 累積 4 步 (真實 batch 4 * 累積 4 = 實質 batch 16)
-        accumulation_steps = 4 
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=Learning_rate, weight_decay=1e-2
+        )
     else:
         # [ResNet 專屬] 維持原本的設定
         optimizer = torch.optim.Adam(model.parameters(), lr=Learning_rate)
-        accumulation_steps = 1 
 
     # ==========================================
     # 🌟 2. Scheduler 設定
     # ==========================================
-    # 計算總步數時，必須考慮到「累積更新」的次數減少了
-    total_steps_per_epoch = len(train_loader) // accumulation_steps + (1 if len(train_loader) % accumulation_steps != 0 else 0)
-    
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=Learning_rate * max_lr_mult,
-        steps_per_epoch=total_steps_per_epoch,
+        steps_per_epoch=len(train_loader),
         epochs=Epochs,
         # UNet 給 30% 時間暖身，ResNet 預設
-        pct_start=0.3 if model_type == "UNet" else 0.3, 
+        pct_start=0.3 if model_type == "UNet" else 0.3,
     )
 
     amp_enabled = use_cuda and (not disable_amp)
@@ -185,18 +180,17 @@ def train(
 
     print(f"max lr (OneCycleLR): {Learning_rate * max_lr_mult:.6g}")
     print(f"amp enabled: {amp_enabled}")
-    print(f"gradient accumulation steps: {accumulation_steps}")
 
     for epoch in range(Epochs):
         # ---------- Training Phase ----------
         model.train()
         train_loss = 0.0
-        
+
         # 確保 epoch 開始前梯度歸零
         optimizer.zero_grad()
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{Epochs}")
-        for batch_idx, (image, mask) in enumerate(pbar):
+        for image, mask in pbar:
             image = image.to(device, non_blocking=True)
             mask = mask.to(device, non_blocking=True)
 
@@ -216,30 +210,19 @@ def train(
                 else:
                     loss = nn.BCEWithLogitsLoss()(out, mask)
 
-                # 💡 關鍵 1：Loss 必須除以累積步數，才能算出 4 次的平均梯度
-                loss = loss / accumulation_steps
-
-            # 💡 關鍵 2：反向傳播 (累積梯度，但不馬上更新)
             scaler.scale(loss).backward()
 
-            # 💡 關鍵 3：當滿 4 步，或者是最後一個 batch 時，才真正更新權重！
-            if ((batch_idx + 1) % accumulation_steps == 0) or ((batch_idx + 1) == len(train_loader)):
-                
-                # [UNet 專屬保命符] 梯度裁剪 (防止 Loss 爆炸)
-                if model_type == "UNet":
-                    scaler.unscale_(optimizer) 
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # [UNet 專屬保命符] 梯度裁剪 (防止 Loss 爆炸)
+            if model_type == "UNet":
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-                # 正式更新權重
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+            scheduler.step()
 
-                # Scheduler 配合真實的更新節奏走
-                scheduler.step()
-
-            # 顯示用的 Loss 記得乘回來
-            current_loss = loss.item() * accumulation_steps
+            current_loss = loss.item()
             train_loss += current_loss
             pbar.set_postfix({"Loss": f"{current_loss:.4f}"})
 
