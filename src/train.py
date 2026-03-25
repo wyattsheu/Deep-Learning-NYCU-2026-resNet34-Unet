@@ -139,17 +139,32 @@ def train(
     #     model = nn.DataParallel(model)
     ###########
 
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=Learning_rate,
-        weight_decay=1e-2,
-    )
-    max_lr = Learning_rate * max_lr_mult
-    scheduler = optim.lr_scheduler.OneCycleLR(
+    # ==========================================
+    # 🌟 1. Optimizer 與 梯度累積步數設定
+    # ==========================================
+    if model_type == "UNet":
+        # [UNet 專屬] 改用 AdamW 加 Weight Decay 防過擬合
+        optimizer = torch.optim.AdamW(model.parameters(), lr=Learning_rate, weight_decay=1e-2)
+        # [UNet 專屬] 累積 4 步 (真實 batch 4 * 累積 4 = 實質 batch 16)
+        accumulation_steps = 4 
+    else:
+        # [ResNet 專屬] 維持原本的設定
+        optimizer = torch.optim.Adam(model.parameters(), lr=Learning_rate)
+        accumulation_steps = 1 
+
+    # ==========================================
+    # 🌟 2. Scheduler 設定
+    # ==========================================
+    # 計算總步數時，必須考慮到「累積更新」的次數減少了
+    total_steps_per_epoch = len(train_loader) // accumulation_steps + (1 if len(train_loader) % accumulation_steps != 0 else 0)
+    
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
-        max_lr=max_lr,
-        steps_per_epoch=len(train_loader),
+        max_lr=Learning_rate * max_lr_mult,
+        steps_per_epoch=total_steps_per_epoch,
         epochs=Epochs,
+        # UNet 給 30% 時間暖身，ResNet 預設
+        pct_start=0.3 if model_type == "UNet" else 0.3, 
     )
 
     amp_enabled = use_cuda and (not disable_amp)
@@ -165,22 +180,22 @@ def train(
     os.makedirs(save_dir, exist_ok=True)
     best_dice = 0.0
 
-    print(f"max lr (OneCycleLR): {max_lr:.6g}")
+    print(f"max lr (OneCycleLR): {Learning_rate * max_lr_mult:.6g}")
     print(f"amp enabled: {amp_enabled}")
+    print(f"gradient accumulation steps: {accumulation_steps}")
 
     for epoch in range(Epochs):
+        # ---------- Training Phase ----------
         model.train()
-        loss_temp = 0.0
-        valid_steps = 0
-        skipped_non_finite_steps = 0
+        train_loss = 0.0
+        
+        # 確保 epoch 開始前梯度歸零
+        optimizer.zero_grad()
 
-        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{Epochs}")
-
-        for image, mask in progress_bar:
-            image = image.to(device, non_blocking=use_cuda)
-            mask = mask.to(device, non_blocking=use_cuda)
-
-            optimizer.zero_grad(set_to_none=True)
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{Epochs}")
+        for batch_idx, (image, mask) in enumerate(pbar):
+            image = image.to(device, non_blocking=True)
+            mask = mask.to(device, non_blocking=True)
 
             if amp_enabled and hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
                 autocast_context = torch.amp.autocast(device_type="cuda", enabled=True)
@@ -190,52 +205,42 @@ def train(
                 autocast_context = nullcontext()
 
             with autocast_context:
-
-                # 如果模型有被包裝 (有 module 屬性)，就脫殼；如果沒有，就保持原樣
-                # raw_model = model.module if hasattr(model, "module") else model
-                # out = raw_model(image)
-                ####
                 out = model(image)
-
                 if model_type == "UNet":
                     focal_loss = focal_loss_from_logits(out, mask)
                     dice_loss = dice_loss_from_logits(out, mask)
                     loss = 0.5 * focal_loss + 0.5 * dice_loss
                 else:
-                    bce_loss = nn.BCEWithLogitsLoss()(out, mask)
-                    dice_loss = dice_loss_from_logits(out, mask)
-                    loss = 0.2 * bce_loss + 0.8 * dice_loss
+                    loss = nn.BCEWithLogitsLoss()(out, mask)
 
-            # Check for non-finite loss BEFORE backward to avoid corrupting GradScaler state
-            if not torch.isfinite(loss):
-                skipped_non_finite_steps += 1
-                optimizer.zero_grad(set_to_none=True)
-                progress_bar.set_postfix({"Loss": "nan/inf (skipped)"})
-                continue
+                # 💡 關鍵 1：Loss 必須除以累積步數，才能算出 4 次的平均梯度
+                loss = loss / accumulation_steps
 
+            # 💡 關鍵 2：反向傳播 (累積梯度，但不馬上更新)
             scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
-            scheduler.step()
 
-            loss_temp += loss.item()
-            valid_steps += 1
-            progress_bar.set_postfix({"Loss": f"{loss.item():.4f}"})
+            # 💡 關鍵 3：當滿 4 步，或者是最後一個 batch 時，才真正更新權重！
+            if ((batch_idx + 1) % accumulation_steps == 0) or ((batch_idx + 1) == len(train_loader)):
+                
+                # [UNet 專屬保命符] 梯度裁剪 (防止 Loss 爆炸)
+                if model_type == "UNet":
+                    scaler.unscale_(optimizer) 
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-        if valid_steps == 0:
-            print(
-                f"Epoch {epoch+1}: all steps were skipped due to non-finite values. "
-                "Consider lower --learning_rate / --max_lr_mult or use --disable_amp."
-            )
-            break
+                # 正式更新權重
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
-        avg_train_loss = loss_temp / valid_steps
-        if skipped_non_finite_steps > 0:
-            print(
-                f"Epoch {epoch+1}: skipped {skipped_non_finite_steps} non-finite steps."
-            )
+                # Scheduler 配合真實的更新節奏走
+                scheduler.step()
+
+            # 顯示用的 Loss 記得乘回來
+            current_loss = loss.item() * accumulation_steps
+            train_loss += current_loss
+            pbar.set_postfix({"Loss": f"{current_loss:.4f}"})
+
+        avg_train_loss = train_loss / len(train_loader)
 
         print(f"Evaluating Epoch {epoch+1}...")
         val_dice = evaluate(model, val_loader, device)

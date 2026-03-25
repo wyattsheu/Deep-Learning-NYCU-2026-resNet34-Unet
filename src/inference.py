@@ -358,7 +358,7 @@ def build_argparser():
     parser.add_argument(
         "--model-type",
         type=str,
-        default="ResNet34_UNet",
+        default="UNet",
         choices=["ResNet34_UNet", "ResNet34_UNet"],
         help="Model architecture hint (ignored if --model-path filename clearly indicates model type)",
     )
