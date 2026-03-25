@@ -266,7 +266,7 @@ class OxfordPetDataset(Dataset):
 
             elif color_choice < 0.8:
                 # 🌟 新增！20% 機率：高斯模糊 (抗失焦)
-                blur = v2.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))
+                blur = v2.GaussianBlur(kernel_size=5, sigma=(1, 2))
                 image = blur(image)
 
         # 最後補邊與轉 tensor
@@ -423,7 +423,7 @@ def _visualize_all_augmentations():
     image_noise = add_gaussian_noise(vis_image_small, sigma=vis_noise_sigma)
 
     # 🌟 新增！高斯模糊
-    blur_transform = v2.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))
+    blur_transform = v2.GaussianBlur(kernel_size=5, sigma=(1, 2))
     image_blur = blur_transform(vis_image_small)
 
     # 最終轉 Tensor 並加上鏡像外圍
